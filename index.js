@@ -29,12 +29,11 @@ function readDB() {
   if (!db.profiles) db.profiles = {};
   return db;
 }
-
 function writeDB(db) {
   fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
 }
 
-// ---------- เวลาแบบ Asia/Bangkok (UTC+7) โดยไม่ต้องพึ่ง timezone DB ----------
+// ---------- เวลาแบบ Asia/Bangkok (UTC+7) ----------
 function bangkokNow() {
   return new Date(Date.now() + 7 * 60 * 60 * 1000);
 }
@@ -46,10 +45,8 @@ function addDays(shiftedDate, n) {
 }
 
 const THAI_DAYS = ['อาทิตย์', 'จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์', 'เสาร์'];
-const THAI_MONTHS = [
-  'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
-  'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.',
-];
+const THAI_DAYS_SHORT = ['อา', 'จ', 'อ', 'พ', 'พฤ', 'ศ', 'ส'];
+const THAI_MONTHS = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
 
 function formatThaiDate(shiftedDate) {
   const day = THAI_DAYS[shiftedDate.getUTCDay()];
@@ -57,22 +54,56 @@ function formatThaiDate(shiftedDate) {
   const month = THAI_MONTHS[shiftedDate.getUTCMonth()];
   return `${day} ${date} ${month}`;
 }
-
+function shortDayLabel(shiftedDate) {
+  return `${THAI_DAYS_SHORT[shiftedDate.getUTCDay()]} ${shiftedDate.getUTCDate()}/${shiftedDate.getUTCMonth() + 1}`;
+}
 function getWeekDateKeys(shiftedToday) {
   const dow = shiftedToday.getUTCDay();
   const diffToMonday = dow === 0 ? -6 : 1 - dow;
   const monday = addDays(shiftedToday, diffToMonday);
   return Array.from({ length: 7 }, (_, i) => addDays(monday, i));
 }
-
 function formatMinutes(total) {
   const hours = Math.floor(total / 60);
   const mins = total % 60;
   return hours > 0 ? `${hours} ชม. ${mins} นาที` : `${mins} นาที`;
 }
 
-// ---------- แปลงข้อความเป็นจำนวนนาที ----------
-function parseDurationMinutes(text) {
+// ---------- ประเภทกีฬา ----------
+const TYPE_MAP = {
+  running: { label: 'วิ่ง', emoji: '🏃' },
+  swimming: { label: 'ว่ายน้ำ', emoji: '🏊' },
+  weights: { label: 'ยกเวท', emoji: '🏋️' },
+  yoga: { label: 'โยคะ', emoji: '🧘' },
+  cycling: { label: 'ปั่นจักรยาน', emoji: '🚴' },
+  walking: { label: 'เดิน', emoji: '🚶' },
+  badminton: { label: 'แบดมินตัน', emoji: '🏸' },
+  football: { label: 'ฟุตบอล', emoji: '⚽' },
+  basketball: { label: 'บาสเกตบอล', emoji: '🏀' },
+  other: { label: 'อื่นๆ', emoji: '💪' },
+};
+const TYPE_KEYWORDS = [
+  { key: 'swimming', words: ['ว่ายน้ำ', 'ว่ายนํ้า'] },
+  { key: 'running', words: ['วิ่ง'] },
+  { key: 'weights', words: ['ยกเวท', 'ยกน้ำหนัก', 'เข้ายิม', 'เล่นกล้าม', 'เวท'] },
+  { key: 'yoga', words: ['โยคะ'] },
+  { key: 'cycling', words: ['ปั่นจักรยาน', 'ปั่น', 'จักรยาน', 'ไบค์'] },
+  { key: 'badminton', words: ['แบดมินตัน', 'แบด'] },
+  { key: 'basketball', words: ['บาสเกตบอล', 'บาส'] },
+  { key: 'football', words: ['ฟุตบอล'] },
+  { key: 'walking', words: ['เดิน'] },
+];
+function detectExerciseType(text) {
+  for (const t of TYPE_KEYWORDS) {
+    if (t.words.some((w) => text.includes(w))) return t.key;
+  }
+  return 'other';
+}
+
+const CHART_COLORS = ['#06C755', '#FFC107', '#FF7043', '#42A5F5', '#AB47BC', '#26A69A', '#8D6E63', '#EC407A', '#78909C', '#9CCC65'];
+
+// ---------- แปลงข้อความเป็นจำนวนนาที + ประเภทกีฬา ----------
+function parseExerciseText(text) {
   let total = 0;
   let matched = false;
 
@@ -87,7 +118,8 @@ function parseDurationMinutes(text) {
     matched = true;
   }
   if (!matched) return null;
-  return Math.round(total);
+
+  return { minutes: Math.round(total), type: detectExerciseType(text) };
 }
 
 // ---------- แยกประเภทแชท (ส่วนตัว / กลุ่ม / ห้อง) ----------
@@ -100,30 +132,37 @@ function contextKeyOf(context) {
   return context.type === 'user' ? `user:${context.id}` : `${context.type}:${context.id}`;
 }
 
-// ---------- ดึงชื่อผู้ใช้ (พร้อม cache ใน db.profiles) ----------
+// ---------- ดึงชื่อผู้ใช้ (พร้อม cache) ----------
 async function getDisplayName(userId, context) {
   const db = readDB();
   if (db.profiles[userId]) return db.profiles[userId];
-
   try {
     let url;
-    if (context.type === 'group') {
-      url = `https://api.line.me/v2/bot/group/${context.id}/member/${userId}`;
-    } else if (context.type === 'room') {
-      url = `https://api.line.me/v2/bot/room/${context.id}/member/${userId}`;
-    } else {
-      url = `https://api.line.me/v2/bot/profile/${userId}`;
-    }
-    const res = await axios.get(url, {
-      headers: { Authorization: `Bearer ${CHANNEL_ACCESS_TOKEN}` },
-    });
+    if (context.type === 'group') url = `https://api.line.me/v2/bot/group/${context.id}/member/${userId}`;
+    else if (context.type === 'room') url = `https://api.line.me/v2/bot/room/${context.id}/member/${userId}`;
+    else url = `https://api.line.me/v2/bot/profile/${userId}`;
+    const res = await axios.get(url, { headers: { Authorization: `Bearer ${CHANNEL_ACCESS_TOKEN}` } });
     const name = res.data.displayName || 'เพื่อนสมาชิก';
     db.profiles[userId] = name;
     writeDB(db);
     return name;
   } catch (err) {
-    // เกิดขึ้นได้ถ้าผู้ใช้ยังไม่ได้เพิ่มบอทเป็นเพื่อน ทำให้ดึงโปรไฟล์ไม่ได้
     return `สมาชิก#${userId.slice(-4)}`;
+  }
+}
+
+// ---------- สร้างรูปกราฟผ่าน QuickChart (ฟรี ไม่ต้องมี API key) ----------
+async function createChartUrl(chartConfig, { width = 600, height = 300, backgroundColor = 'white' } = {}) {
+  try {
+    const res = await axios.post(
+      'https://quickchart.io/chart/create',
+      { chart: chartConfig, width, height, backgroundColor, devicePixelRatio: 2 },
+      { timeout: 8000 }
+    );
+    if (res.data && res.data.success) return res.data.url;
+    return null;
+  } catch (err) {
+    return null; // ถ้าสร้างกราฟไม่ได้ ให้ fallback ไม่มีรูป ไม่ทำให้บอทพัง
   }
 }
 
@@ -143,246 +182,394 @@ function buildQuickReply() {
   };
 }
 
+// ---------- Flex Message builders ----------
+function flexRow(label, value, opts = {}) {
+  return {
+    type: 'box',
+    layout: 'baseline',
+    spacing: 'sm',
+    contents: [
+      { type: 'text', text: label, size: 'sm', color: '#666666', flex: 3, wrap: true },
+      {
+        type: 'text',
+        text: value,
+        size: 'sm',
+        color: opts.color || '#111111',
+        align: 'end',
+        flex: 2,
+        weight: opts.bold ? 'bold' : 'regular',
+      },
+    ],
+  };
+}
+function flexBubble({ title, subtitle, heroUrl, rows, footer }) {
+  const bodyContents = [{ type: 'text', text: title, weight: 'bold', size: 'lg', color: '#06C755', wrap: true }];
+  if (subtitle) bodyContents.push({ type: 'text', text: subtitle, size: 'xs', color: '#999999', margin: 'xs' });
+  bodyContents.push({ type: 'separator', margin: 'md' });
+  bodyContents.push({ type: 'box', layout: 'vertical', margin: 'md', spacing: 'sm', contents: rows });
+  if (footer) {
+    bodyContents.push({ type: 'separator', margin: 'md' });
+    bodyContents.push({ type: 'text', text: footer, size: 'xs', color: '#999999', margin: 'md', wrap: true });
+  }
+  const bubble = { type: 'bubble', body: { type: 'box', layout: 'vertical', spacing: 'md', contents: bodyContents } };
+  if (heroUrl) bubble.hero = { type: 'image', url: heroUrl, size: 'full', aspectRatio: '20:13', aspectMode: 'cover' };
+  return bubble;
+}
+function toFlexMessage(altText, bubbles) {
+  const contents = bubbles.length === 1 ? bubbles[0] : { type: 'carousel', contents: bubbles };
+  return { type: 'flex', altText, contents, quickReply: buildQuickReply() };
+}
+
 // ---------- ตอบกลับ LINE ----------
 async function replyMessage(replyToken, messages) {
   await axios.post(
     'https://api.line.me/v2/bot/message/reply',
     { replyToken, messages },
-    {
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${CHANNEL_ACCESS_TOKEN}`,
-      },
-    }
+    { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${CHANNEL_ACCESS_TOKEN}` } }
   );
 }
 
 // ---------- บันทึกข้อมูล ----------
-function logExercise(userId, contextKey, minutes) {
+function logExercise(userId, contextKey, minutes, type) {
   const db = readDB();
-  const today = bangkokNow();
   db.logs.push({
     userId,
     contextKey,
-    dateKey: dateKeyOf(today),
+    dateKey: dateKeyOf(bangkokNow()),
     minutes,
+    type,
     createdAt: new Date().toISOString(),
   });
   writeDB(db);
 }
 
-// ---------- สรุปส่วนตัว (ใช้ได้ทั้งแชทส่วนตัวและในกลุ่ม กรองเฉพาะของคนนั้น) ----------
-function getPersonalTodayMinutes(userId, contextKey) {
+// ---------- Aggregation helpers ----------
+function getWeekDailyMinutes(contextKey, userId = null) {
   const db = readDB();
-  const todayKey = dateKeyOf(bangkokNow());
-  return db.logs
-    .filter((l) => l.userId === userId && l.contextKey === contextKey && l.dateKey === todayKey)
-    .reduce((sum, l) => sum + l.minutes, 0);
+  const weekDates = getWeekDateKeys(bangkokNow());
+  const weekKeys = weekDates.map(dateKeyOf);
+  const perDay = {};
+  weekKeys.forEach((k) => (perDay[k] = 0));
+  db.logs.forEach((l) => {
+    if (l.contextKey !== contextKey) return;
+    if (userId && l.userId !== userId) return;
+    if (weekKeys.includes(l.dateKey)) perDay[l.dateKey] += l.minutes;
+  });
+  return { weekDates, weekKeys, perDay };
 }
-
-function getPersonalWeekMinutes(userId, contextKey) {
+function getTypeBreakdown(contextKey, { userId = null, onlyToday = false } = {}) {
   const db = readDB();
   const weekKeys = getWeekDateKeys(bangkokNow()).map(dateKeyOf);
-  return db.logs
-    .filter((l) => l.userId === userId && l.contextKey === contextKey && weekKeys.includes(l.dateKey))
-    .reduce((sum, l) => sum + l.minutes, 0);
-}
-
-function getPersonalSummaryText(userId, contextKey) {
-  const today = getPersonalTodayMinutes(userId, contextKey);
-  const week = getPersonalWeekMinutes(userId, contextKey);
-  const todayText = today > 0 ? formatMinutes(today) : 'ยังไม่ได้ออกกำลังกาย';
-  return `👤 สรุปของฉัน (ในแชทนี้)\nวันนี้: ${todayText}\nสัปดาห์นี้รวม: ${formatMinutes(week)}`;
-}
-
-// ---------- สรุปแบบเดี่ยว (1:1) ----------
-function getTodaySummaryText(userId, contextKey) {
-  const total = getPersonalTodayMinutes(userId, contextKey);
-  if (total === 0) {
-    return '📌 วันนี้ยังไม่มีการบันทึกออกกำลังกายเลยนะ ลองกดปุ่มด้านล่างเพื่อบันทึกได้เลย 💪';
-  }
-  return `✅ วันนี้ออกกำลังกายไปแล้ว ${formatMinutes(total)} เก่งมาก!`;
-}
-
-function getWeeklySummaryText(userId, contextKey) {
-  const db = readDB();
-  const today = bangkokNow();
-  const weekDates = getWeekDateKeys(today);
-  const weekKeys = weekDates.map(dateKeyOf);
-
-  const userLogs = db.logs.filter(
-    (l) => l.userId === userId && l.contextKey === contextKey && weekKeys.includes(l.dateKey)
-  );
-
-  const perDay = {};
-  weekKeys.forEach((k) => (perDay[k] = 0));
-  userLogs.forEach((l) => {
-    perDay[l.dateKey] += l.minutes;
-  });
-
-  const lines = weekDates.map((d) => {
-    const key = dateKeyOf(d);
-    const mins = perDay[key];
-    const label = formatThaiDate(d);
-    const isFuture = d.getTime() > today.getTime();
-    if (isFuture) return `${label}: -`;
-    return mins > 0 ? `${label}: ${mins} นาที` : `${label}: ไม่ได้ออกกำลังกาย`;
-  });
-
-  const totalMinutes = Object.values(perDay).reduce((a, b) => a + b, 0);
-  const daysExercised = Object.values(perDay).filter((m) => m > 0).length;
-
-  return (
-    `📊 สรุปสัปดาห์นี้\n` +
-    lines.join('\n') +
-    `\n\nรวมทั้งสัปดาห์: ${formatMinutes(totalMinutes)}\n` +
-    `ออกกำลังกาย ${daysExercised}/7 วัน`
-  );
-}
-
-// ---------- สรุปแบบกลุ่ม (รวมทุกคนในกลุ่ม) ----------
-async function getGroupTodaySummaryText(contextKey, context) {
-  const db = readDB();
   const todayKey = dateKeyOf(bangkokNow());
-  const todayLogs = db.logs.filter((l) => l.contextKey === contextKey && l.dateKey === todayKey);
-
-  if (todayLogs.length === 0) {
-    return '📌 วันนี้ยังไม่มีใครในกลุ่มบันทึกออกกำลังกายเลย ลองเริ่มคนแรกกันเลย 💪';
-  }
-
+  const perType = {};
+  db.logs.forEach((l) => {
+    if (l.contextKey !== contextKey) return;
+    if (userId && l.userId !== userId) return;
+    if (onlyToday && l.dateKey !== todayKey) return;
+    if (!onlyToday && !weekKeys.includes(l.dateKey)) return;
+    const key = l.type || 'other';
+    perType[key] = (perType[key] || 0) + l.minutes;
+  });
+  return perType;
+}
+function getPerUserMinutes(contextKey, { onlyToday = false } = {}) {
+  const db = readDB();
+  const weekKeys = getWeekDateKeys(bangkokNow()).map(dateKeyOf);
+  const todayKey = dateKeyOf(bangkokNow());
   const perUser = {};
-  todayLogs.forEach((l) => {
+  db.logs.forEach((l) => {
+    if (l.contextKey !== contextKey) return;
+    if (onlyToday && l.dateKey !== todayKey) return;
+    if (!onlyToday && !weekKeys.includes(l.dateKey)) return;
     perUser[l.userId] = (perUser[l.userId] || 0) + l.minutes;
   });
-
-  const entries = Object.entries(perUser).sort((a, b) => b[1] - a[1]);
-  const lines = [];
-  for (const [userId, mins] of entries) {
-    const name = await getDisplayName(userId, context);
-    lines.push(`• ${name}: ${mins} นาที`);
-  }
-
-  const total = entries.reduce((sum, [, m]) => sum + m, 0);
-  return (
-    `✅ วันนี้ในกลุ่มออกกำลังกายรวม ${formatMinutes(total)} (${entries.length} คน)\n` +
-    lines.join('\n')
-  );
+  return perUser;
 }
 
-async function getGroupWeeklySummaryText(contextKey, context) {
-  const db = readDB();
-  const today = bangkokNow();
-  const weekDates = getWeekDateKeys(today);
-  const weekKeys = weekDates.map(dateKeyOf);
+function typeBreakdownRows(perType) {
+  return Object.entries(perType)
+    .sort((a, b) => b[1] - a[1])
+    .map(([key, mins]) => {
+      const meta = TYPE_MAP[key] || TYPE_MAP.other;
+      return flexRow(`${meta.emoji} ${meta.label}`, formatMinutes(mins));
+    });
+}
 
-  const weekLogs = db.logs.filter((l) => l.contextKey === contextKey && weekKeys.includes(l.dateKey));
+// ---------- Flex: สรุปวันนี้ (ส่วนตัว/ในกลุ่มเฉพาะตัวเอง) ----------
+async function buildTodayFlex({ contextKey, userId, isGroup }) {
+  const { weekDates, perDay } = getWeekDailyMinutes(contextKey, userId);
+  const todayKey = dateKeyOf(bangkokNow());
+  const todayIndex = weekDates.findIndex((d) => dateKeyOf(d) === todayKey);
+  const dayLabels = weekDates.map(shortDayLabel);
+  const dayValues = weekDates.map((d) => perDay[dateKeyOf(d)] || 0);
 
-  // รวมต่อวัน (ทุกคนรวมกัน)
-  const perDay = {};
-  weekKeys.forEach((k) => (perDay[k] = 0));
-  weekLogs.forEach((l) => {
-    perDay[l.dateKey] += l.minutes;
+  const chartConfig = {
+    type: 'bar',
+    data: {
+      labels: dayLabels,
+      datasets: [
+        { label: 'นาที', data: dayValues, backgroundColor: dayValues.map((_, i) => (i === todayIndex ? '#06C755' : '#BFE8CB')) },
+      ],
+    },
+    options: { legend: { display: false }, scales: { yAxes: [{ ticks: { beginAtZero: true, precision: 0 } }] } },
+  };
+  const chartUrl = await createChartUrl(chartConfig, { width: 600, height: 280 });
+
+  const todayTotal = dayValues[todayIndex] || 0;
+  const rows = [flexRow('รวมวันนี้', formatMinutes(todayTotal), { bold: true, color: '#06C755' })];
+  const typeToday = getTypeBreakdown(contextKey, { userId, onlyToday: true });
+  rows.push(...typeBreakdownRows(typeToday));
+
+  const bubble = flexBubble({
+    title: '✅ สรุปวันนี้',
+    subtitle: isGroup ? 'เฉพาะของคุณในกลุ่มนี้' : null,
+    heroUrl: chartUrl,
+    rows,
+    footer: todayTotal === 0 ? 'ยังไม่ได้บันทึกวันนี้เลย ลองกดปุ่มด้านล่างได้เลย 💪' : null,
   });
+  return toFlexMessage('สรุปวันนี้', [bubble]);
+}
 
-  const dayLines = weekDates.map((d) => {
-    const key = dateKeyOf(d);
-    const mins = perDay[key];
-    const label = formatThaiDate(d);
-    const isFuture = d.getTime() > today.getTime();
-    if (isFuture) return `${label}: -`;
-    return mins > 0 ? `${label}: ${mins} นาที` : `${label}: ไม่มีใครออกกำลังกาย`;
-  });
+// ---------- Flex: สรุปสัปดาห์ (ส่วนตัว) ----------
+async function buildPersonalWeekFlex({ contextKey, userId, isGroup }) {
+  const { weekDates, perDay } = getWeekDailyMinutes(contextKey, userId);
+  const dayLabels = weekDates.map(shortDayLabel);
+  const dayValues = weekDates.map((d) => perDay[dateKeyOf(d)] || 0);
+  const totalMinutes = dayValues.reduce((a, b) => a + b, 0);
+  const daysActive = dayValues.filter((v) => v > 0).length;
 
-  // จัดอันดับต่อคน
-  const perUser = {};
-  weekLogs.forEach((l) => {
-    perUser[l.userId] = (perUser[l.userId] || 0) + l.minutes;
-  });
+  const barConfig = {
+    type: 'bar',
+    data: { labels: dayLabels, datasets: [{ label: 'นาที', data: dayValues, backgroundColor: '#06C755' }] },
+    options: { legend: { display: false }, scales: { yAxes: [{ ticks: { beginAtZero: true, precision: 0 } }] } },
+  };
+  const chartUrl = await createChartUrl(barConfig, { width: 600, height: 280 });
+
+  const bubbles = [
+    flexBubble({
+      title: '📊 สรุปสัปดาห์นี้',
+      subtitle: isGroup ? 'เฉพาะของคุณในกลุ่มนี้' : null,
+      heroUrl: chartUrl,
+      rows: [
+        flexRow('รวมทั้งสัปดาห์', formatMinutes(totalMinutes), { bold: true, color: '#06C755' }),
+        flexRow('ออกกำลังกาย', `${daysActive}/7 วัน`),
+      ],
+    }),
+  ];
+
+  const typeBreakdown = getTypeBreakdown(contextKey, { userId });
+  const typeEntries = Object.entries(typeBreakdown).sort((a, b) => b[1] - a[1]);
+  if (typeEntries.length > 0) {
+    const doughnutConfig = {
+      type: 'doughnut',
+      data: {
+        labels: typeEntries.map(([k]) => (TYPE_MAP[k] || TYPE_MAP.other).label),
+        datasets: [{ data: typeEntries.map(([, v]) => v), backgroundColor: CHART_COLORS }],
+      },
+      options: { legend: { position: 'right' } },
+    };
+    const doughnutUrl = await createChartUrl(doughnutConfig, { width: 500, height: 320 });
+    bubbles.push(
+      flexBubble({ title: '🏷️ แยกตามประเภทกีฬา', heroUrl: doughnutUrl, rows: typeBreakdownRows(typeBreakdown) })
+    );
+  }
+
+  return toFlexMessage('สรุปสัปดาห์นี้', bubbles);
+}
+
+// ---------- Flex: สรุปวันนี้ (กลุ่ม รวมทุกคน) ----------
+async function buildGroupTodayFlex({ contextKey, context }) {
+  const perUser = getPerUserMinutes(contextKey, { onlyToday: true });
   const ranking = Object.entries(perUser).sort((a, b) => b[1] - a[1]);
 
-  const medals = ['🥇', '🥈', '🥉'];
-  const rankLines = [];
-  for (let i = 0; i < ranking.length; i++) {
-    const [userId, mins] = ranking[i];
-    const name = await getDisplayName(userId, context);
-    const medal = medals[i] || `${i + 1}.`;
-    rankLines.push(`${medal} ${name} - ${mins} นาที`);
+  if (ranking.length === 0) {
+    const bubble = flexBubble({
+      title: '✅ สรุปวันนี้ (กลุ่ม)',
+      rows: [],
+      footer: 'วันนี้ยังไม่มีใครในกลุ่มบันทึกออกกำลังกายเลย ลองเริ่มคนแรกกันเลย 💪',
+    });
+    return toFlexMessage('สรุปวันนี้ (กลุ่ม)', [bubble]);
   }
 
-  const totalMinutes = Object.values(perDay).reduce((a, b) => a + b, 0);
+  const names = [];
+  for (const [uid] of ranking) names.push(await getDisplayName(uid, context));
 
-  let text = `📊 สรุปสัปดาห์นี้ (กลุ่ม)\n` + dayLines.join('\n') + `\n\nรวมทั้งกลุ่ม: ${formatMinutes(totalMinutes)}`;
-  if (rankLines.length > 0) {
-    text += `\n\n🏆 อันดับสมาชิก\n` + rankLines.join('\n');
+  const chartConfig = {
+    type: 'bar',
+    data: { labels: names, datasets: [{ label: 'นาที', data: ranking.map(([, v]) => v), backgroundColor: '#06C755' }] },
+    options: { legend: { display: false }, scales: { yAxes: [{ ticks: { beginAtZero: true, precision: 0 } }] } },
+  };
+  const chartUrl = await createChartUrl(chartConfig, { width: 600, height: 300 });
+
+  const total = ranking.reduce((sum, [, m]) => sum + m, 0);
+  const rows = [flexRow('รวมทั้งกลุ่มวันนี้', formatMinutes(total), { bold: true, color: '#06C755' })];
+  ranking.forEach(([, mins], i) => rows.push(flexRow(names[i], formatMinutes(mins))));
+
+  const bubble = flexBubble({ title: '✅ สรุปวันนี้ (กลุ่ม)', heroUrl: chartUrl, rows });
+  return toFlexMessage('สรุปวันนี้ (กลุ่ม)', [bubble]);
+}
+
+// ---------- Flex: สรุปสัปดาห์ (กลุ่ม) ----------
+async function buildGroupWeekFlex({ contextKey, context }) {
+  const { weekDates, perDay } = getWeekDailyMinutes(contextKey);
+  const dayLabels = weekDates.map(shortDayLabel);
+  const dayValues = weekDates.map((d) => perDay[dateKeyOf(d)] || 0);
+  const totalMinutes = dayValues.reduce((a, b) => a + b, 0);
+  const daysActive = dayValues.filter((v) => v > 0).length;
+
+  const barConfig = {
+    type: 'bar',
+    data: { labels: dayLabels, datasets: [{ label: 'นาที', data: dayValues, backgroundColor: '#06C755' }] },
+    options: { legend: { display: false }, scales: { yAxes: [{ ticks: { beginAtZero: true, precision: 0 } }] } },
+  };
+  const chartUrl = await createChartUrl(barConfig, { width: 600, height: 280 });
+
+  const bubbles = [
+    flexBubble({
+      title: '📊 สรุปสัปดาห์นี้ (กลุ่ม)',
+      heroUrl: chartUrl,
+      rows: [
+        flexRow('รวมทั้งกลุ่ม', formatMinutes(totalMinutes), { bold: true, color: '#06C755' }),
+        flexRow('วันที่มีคนออกกำลังกาย', `${daysActive}/7 วัน`),
+      ],
+    }),
+  ];
+
+  const typeBreakdown = getTypeBreakdown(contextKey);
+  const typeEntries = Object.entries(typeBreakdown).sort((a, b) => b[1] - a[1]);
+  if (typeEntries.length > 0) {
+    const doughnutConfig = {
+      type: 'doughnut',
+      data: {
+        labels: typeEntries.map(([k]) => (TYPE_MAP[k] || TYPE_MAP.other).label),
+        datasets: [{ data: typeEntries.map(([, v]) => v), backgroundColor: CHART_COLORS }],
+      },
+      options: { legend: { position: 'right' } },
+    };
+    const doughnutUrl = await createChartUrl(doughnutConfig, { width: 500, height: 320 });
+    bubbles.push(
+      flexBubble({ title: '🏷️ แยกตามประเภทกีฬา', heroUrl: doughnutUrl, rows: typeBreakdownRows(typeBreakdown) })
+    );
   }
-  return text;
+
+  const perUser = getPerUserMinutes(contextKey);
+  const ranking = Object.entries(perUser).sort((a, b) => b[1] - a[1]);
+  if (ranking.length > 0) {
+    const names = [];
+    for (const [uid] of ranking) names.push(await getDisplayName(uid, context));
+    const rankConfig = {
+      type: 'bar',
+      data: { labels: names, datasets: [{ label: 'นาที', data: ranking.map(([, v]) => v), backgroundColor: CHART_COLORS }] },
+      options: { legend: { display: false }, scales: { yAxes: [{ ticks: { beginAtZero: true, precision: 0 } }] } },
+    };
+    const rankUrl = await createChartUrl(rankConfig, { width: 600, height: 300 });
+    const medals = ['🥇', '🥈', '🥉'];
+    const rankRows = ranking.map(([, mins], i) => flexRow(`${medals[i] || `${i + 1}.`} ${names[i]}`, formatMinutes(mins)));
+    bubbles.push(flexBubble({ title: '🏆 อันดับสมาชิก', heroUrl: rankUrl, rows: rankRows }));
+  }
+
+  return toFlexMessage('สรุปสัปดาห์นี้ (กลุ่ม)', bubbles);
+}
+
+// ---------- ข้อความสำรอง (fallback) แบบ text ล้วน เผื่อสร้าง Flex/กราฟพลาด ----------
+function fallbackTodayText(contextKey, userId) {
+  const { perDay } = getWeekDailyMinutes(contextKey, userId);
+  const total = perDay[dateKeyOf(bangkokNow())] || 0;
+  return total === 0
+    ? '📌 วันนี้ยังไม่มีการบันทึกออกกำลังกายเลยนะ ลองกดปุ่มด้านล่างเพื่อบันทึกได้เลย 💪'
+    : `✅ วันนี้ออกกำลังกายไปแล้ว ${formatMinutes(total)} เก่งมาก!`;
+}
+function fallbackWeekText(contextKey, userId) {
+  const { weekDates, perDay } = getWeekDailyMinutes(contextKey, userId);
+  const lines = weekDates.map((d) => {
+    const mins = perDay[dateKeyOf(d)] || 0;
+    return `${formatThaiDate(d)}: ${mins > 0 ? mins + ' นาที' : 'ไม่ได้ออกกำลังกาย'}`;
+  });
+  const total = Object.values(perDay).reduce((a, b) => a + b, 0);
+  return `📊 สรุปสัปดาห์นี้\n${lines.join('\n')}\n\nรวมทั้งสัปดาห์: ${formatMinutes(total)}`;
 }
 
 // ---------- จัดการข้อความที่เข้ามา ----------
 async function handleTextMessage(event) {
   const userId = event.source.userId;
+  if (!userId) return;
   const context = getContext(event.source);
   const contextKey = contextKeyOf(context);
   const isGroup = context.type === 'group' || context.type === 'room';
   const text = event.message.text.trim();
 
-  if (!userId) {
-    // บาง event ในกลุ่มอาจไม่มี userId (ผู้ใช้ปิดการแชร์ข้อมูล) ข้ามไปเลย
-    return;
-  }
+  const parsed = parseExerciseText(text);
+  let messages;
 
-  const minutes = parseDurationMinutes(text);
-  let replyText;
-
-  if (minutes !== null && minutes > 0) {
-    logExercise(userId, contextKey, minutes);
-    if (isGroup) {
-      const name = await getDisplayName(userId, context);
-      const personalToday = getPersonalTodayMinutes(userId, contextKey);
-      replyText = `บันทึกแล้ว! 🏃‍♂️ ${name} ออกกำลังกาย ${minutes} นาที\nวันนี้ของคุณรวม: ${formatMinutes(personalToday)}`;
+  try {
+    if (parsed) {
+      logExercise(userId, contextKey, parsed.minutes, parsed.type);
+      const meta = TYPE_MAP[parsed.type];
+      if (isGroup) {
+        const name = await getDisplayName(userId, context);
+        messages = [
+          {
+            type: 'text',
+            text: `บันทึกแล้ว! ${meta.emoji} ${name} ${meta.label} ${parsed.minutes} นาที`,
+            quickReply: buildQuickReply(),
+          },
+        ];
+      } else {
+        messages = [
+          {
+            type: 'text',
+            text: `บันทึกแล้ว! ${meta.emoji} ${meta.label} ${parsed.minutes} นาที`,
+            quickReply: buildQuickReply(),
+          },
+        ];
+      }
+    } else if (text.includes('ของฉัน')) {
+      const flex = await buildPersonalWeekFlexOrToday(contextKey, userId, isGroup, context);
+      messages = [flex];
+    } else if (text.includes('สัปดาห์')) {
+      const flex = isGroup
+        ? await buildGroupWeekFlex({ contextKey, context })
+        : await buildPersonalWeekFlex({ contextKey, userId, isGroup });
+      messages = [flex];
+    } else if (text.includes('วันนี้')) {
+      const flex = isGroup
+        ? await buildGroupTodayFlex({ contextKey, context })
+        : await buildTodayFlex({ contextKey, userId, isGroup });
+      messages = [flex];
     } else {
-      replyText = `บันทึกแล้ว! 🏃‍♂️ ออกกำลังกาย ${minutes} นาที\n\n${getTodaySummaryText(userId, contextKey)}`;
+      messages = [
+        {
+          type: 'text',
+          text:
+            'สวัสดี! 👋 พิมพ์แบบนี้ได้เลย:\n' +
+            '• "วิ่ง 30 นาที" หรือ "ยกเวท 1 ชม" เพื่อบันทึก\n' +
+            '• "วันนี้" เพื่อดูสรุปวันนี้\n' +
+            '• "สรุปสัปดาห์" เพื่อดูสรุปรายสัปดาห์\n' +
+            (isGroup ? '• "ของฉัน" เพื่อดูสรุปเฉพาะของคุณ\n' : '') +
+            '\nหรือกดปุ่มด้านล่างได้เลย 👇',
+          quickReply: buildQuickReply(),
+        },
+      ];
     }
-  } else if (text.includes('ของฉัน')) {
-    replyText = getPersonalSummaryText(userId, contextKey);
-  } else if (text.includes('สัปดาห์')) {
-    replyText = isGroup
-      ? await getGroupWeeklySummaryText(contextKey, context)
-      : getWeeklySummaryText(userId, contextKey);
-  } else if (text.includes('วันนี้')) {
-    replyText = isGroup
-      ? await getGroupTodaySummaryText(contextKey, context)
-      : getTodaySummaryText(userId, contextKey);
-  } else {
-    replyText =
-      'สวัสดี! 👋 พิมพ์แบบนี้ได้เลย:\n' +
-      '• "ออกกำลังกาย 30 นาที" เพื่อบันทึก\n' +
-      '• "วันนี้" เพื่อดูสรุปวันนี้\n' +
-      '• "สรุปสัปดาห์" เพื่อดูสรุปรายสัปดาห์\n' +
-      (isGroup ? '• "ของฉัน" เพื่อดูสรุปเฉพาะของคุณในกลุ่มนี้\n' : '') +
-      '\nหรือกดปุ่มด้านล่างได้เลย 👇';
+  } catch (err) {
+    console.error('Flex build error, falling back to text:', err.message);
+    const fallbackText = text.includes('สัปดาห์') ? fallbackWeekText(contextKey, userId) : fallbackTodayText(contextKey, userId);
+    messages = [{ type: 'text', text: fallbackText, quickReply: buildQuickReply() }];
   }
 
-  await replyMessage(event.replyToken, [
-    {
-      type: 'text',
-      text: replyText,
-      quickReply: buildQuickReply(),
-    },
-  ]);
+  await replyMessage(event.replyToken, messages);
+}
+
+// ของฉัน = แสดงทั้งวันนี้และสัปดาห์นี้เฉพาะของตัวเอง (ใช้ flex สัปดาห์เป็นหลัก อ่านง่ายกว่า)
+async function buildPersonalWeekFlexOrToday(contextKey, userId, isGroup, context) {
+  return buildPersonalWeekFlex({ contextKey, userId, isGroup });
 }
 
 // ---------- Webhook ----------
 app.post('/webhook', async (req, res) => {
   const signature = req.headers['x-line-signature'];
-  const hash = crypto
-    .createHmac('sha256', CHANNEL_SECRET)
-    .update(req.rawBody)
-    .digest('base64');
-
-  if (signature !== hash) {
-    return res.status(401).send('Invalid signature');
-  }
+  const hash = crypto.createHmac('sha256', CHANNEL_SECRET).update(req.rawBody).digest('base64');
+  if (signature !== hash) return res.status(401).send('Invalid signature');
 
   res.status(200).send('OK');
 
@@ -392,13 +579,12 @@ app.post('/webhook', async (req, res) => {
       if (event.type === 'message' && event.message.type === 'text') {
         await handleTextMessage(event);
       } else if (event.type === 'join') {
-        // บอทถูกเชิญเข้ากลุ่ม/ห้อง -- ทักทายแนะนำตัว
         await replyMessage(event.replyToken, [
           {
             type: 'text',
             text:
               'สวัสดีทุกคน! 👋 ผมเป็นบอทช่วยเช็คการออกกำลังกายของกลุ่มนี้\n' +
-              'พิมพ์ "ออกกำลังกาย 30 นาที" เพื่อบันทึก หรือ "สรุปสัปดาห์" เพื่อดูอันดับกลุ่มได้เลย',
+              'พิมพ์ "วิ่ง 30 นาที" เพื่อบันทึก หรือ "สรุปสัปดาห์" เพื่อดูอันดับกลุ่มได้เลย',
             quickReply: buildQuickReply(),
           },
         ]);
@@ -409,9 +595,7 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-app.get('/', (req, res) => {
-  res.send('LINE Exercise Tracker Bot is running ✅');
-});
+app.get('/', (req, res) => res.send('LINE Exercise Tracker Bot is running ✅'));
 
 app.listen(PORT, () => {
   console.log(`Server is listening on port ${PORT}`);
